@@ -6,6 +6,8 @@ import android.os.Bundle
 import android.util.Xml
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -369,6 +371,89 @@ fun KWordApp() {
 
     var reviewIndex by remember { mutableIntStateOf(0) }
     var answerShown by remember { mutableStateOf(false) }
+
+    // 导出生词备份，不包含 API Key。
+    val exportBackupLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val savedWordsJson = JSONArray(
+                    prefs.getString(KEY_WORDS, "[]") ?: "[]"
+                )
+
+                val backup = JSONObject().apply {
+                    put("app", "K-Word")
+                    put("formatVersion", 1)
+                    put("exportedAt", System.currentTimeMillis())
+                    put("savedWords", savedWordsJson)
+                }
+
+                context.contentResolver.openOutputStream(uri)?.bufferedWriter()?.use {
+                    it.write(backup.toString(2))
+                } ?: throw IllegalStateException("无法创建备份文件")
+
+                message = "备份导出成功：${savedWordsJson.length()} 个词条"
+            } catch (e: Exception) {
+                message = "备份导出失败：${e.message ?: "文件写入错误"}"
+            }
+        }
+    }
+
+    // 导入前校验整个文件，成功后才替换生词数据。
+    val importBackupLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                val raw = context.contentResolver.openInputStream(uri)
+                    ?.bufferedReader()?.use { it.readText() }
+                    ?: throw IllegalStateException("无法读取备份文件")
+
+                val backup = JSONObject(raw)
+
+                require(backup.optString("app") == "K-Word") {
+                    "这不是 K-Word 备份文件"
+                }
+
+                require(backup.optInt("formatVersion") == 1) {
+                    "暂不支持该备份版本"
+                }
+
+                val imported = backup.getJSONArray("savedWords")
+
+                for (i in 0 until imported.length()) {
+                    val item = imported.getJSONObject(i)
+                    item.getString("id")
+                    item.getString("word")
+                    item.getString("pos")
+                    item.getString("definitions")
+                    item.getJSONArray("examples")
+                    item.getLong("addedAt")
+                    item.getInt("stage")
+                    item.getLong("nextReviewAt")
+                    item.getString("status")
+                    item.getInt("reviewCount")
+                }
+
+                val committed = prefs.edit()
+                    .putString(KEY_WORDS, imported.toString())
+                    .commit()
+
+                if (!committed) {
+                    throw IllegalStateException("本地保存失败")
+                }
+
+                words = loadWords(context)
+                reviewIndex = 0
+                answerShown = false
+
+                message = "恢复成功：${words.size} 个词条。API Key 未被修改。"
+            } catch (e: Exception) {
+                message = "导入失败，原有生词数据未更改：${e.message ?: "备份文件无效"}"
+            }
+        }
+    }
 
     fun updateWords(newWords: List<SavedWord>) {
         words = newWords
@@ -959,6 +1044,38 @@ fun KWordApp() {
                     Text(
                         "请输入韩国基础词典 API Key。密钥只保存在本机 App 私有设置中。"
                     )
+
+                    Spacer(Modifier.height(10.dp))
+
+                    Text(
+                        "数据备份：导出全部生词和复习进度。API Key 不会写入备份文件。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                exportBackupLauncher.launch("K-Word-backup.json")
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("导出生词")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                importBackupLauncher.launch(
+                                    arrayOf("application/json", "text/*", "*/*")
+                                )
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("导入备份")
+                        }
+                    }
 
                     Spacer(Modifier.height(10.dp))
 
